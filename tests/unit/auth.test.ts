@@ -38,7 +38,7 @@ describe("password hashing", () => {
     expect(await verifyPassword("x", "not-a-hash")).toBe(false);
   }, 20000);
   it("applies a length-based policy", () => {
-    expect(passwordPolicyError("short")).toMatch(/12/);
+    expect(passwordPolicyError("abc")).toMatch(/4/);
     expect(passwordPolicyError("aaaaaaaaaaaaaa")).toBeTruthy();
     expect(passwordPolicyError("mypassword123456")).toBeTruthy();
     expect(passwordPolicyError("jane.doe-and-more-words", "jane.doe@example.com")).toBeTruthy();

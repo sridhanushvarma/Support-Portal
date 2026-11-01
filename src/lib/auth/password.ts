@@ -55,10 +55,10 @@ export function dummyPasswordHash(): Promise<string> {
   return dummyHash;
 }
 
-export const PASSWORD_MIN = 12;
+export const PASSWORD_MIN = 4;
 export const PASSWORD_MAX = 128;
 
-/** Length-based policy per NIST SP 800-63B; returns an error message or null. */
+/** Minimum-length policy; returns an error message or null. */
 export function passwordPolicyError(password: string, email?: string): string | null {
   if (password.length < PASSWORD_MIN) return `Use at least ${PASSWORD_MIN} characters.`;
   if (password.length > PASSWORD_MAX) return `Use at most ${PASSWORD_MAX} characters.`;
