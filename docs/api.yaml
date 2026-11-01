@@ -1,0 +1,330 @@
+openapi: 3.1.0
+info:
+  title: Corporate Technology Website API
+  version: 1.0.0
+  description: |
+    Public read APIs return only published content. Admin APIs require a signed-in staff session cookie
+    (with MFA when enforced) and the listed permission; state-changing admin requests must be same-origin.
+    Every response includes an `X-Request-Id` header. Errors use the envelope
+    `{ "error": { "code", "message", "fields"?, "requestId" } }`.
+servers:
+  - url: /
+tags:
+  - name: Public
+  - name: Admin
+  - name: Operations
+paths:
+  /api/v1/services:
+    get:
+      tags: [Public]
+      summary: Published service summaries in display order
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServiceSummary" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/v1/services/{slug}:
+    get:
+      tags: [Public]
+      summary: One published service with related published projects
+      parameters: [{ $ref: "#/components/parameters/Slug" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/projects:
+    get:
+      tags: [Public]
+      summary: Published projects, newest first
+      parameters:
+        - { name: service, in: query, schema: { type: string }, description: Service slug filter }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - {
+            name: pageSize,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 50, default: 12 },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/ProjectSummary" } }
+                  meta:
+                    type: object
+                    properties:
+                      {
+                        total: { type: integer },
+                        page: { type: integer },
+                        pageCount: { type: integer },
+                        pageSize: { type: integer },
+                      }
+  /api/v1/projects/{slug}:
+    get:
+      tags: [Public]
+      summary: One published project or case study (never drafts)
+      parameters: [{ $ref: "#/components/parameters/Slug" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/enquiries:
+    post:
+      tags: [Public]
+      summary: Submit a project enquiry
+      description: |
+        Validated server-side, rate limited per client IP (5 per 10 minutes, 20 per day) and idempotent on the
+        `Idempotency-Key` header: repeating a request with the same key returns the original reference with 200.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{8,100}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnquiryRequest" }
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                {
+                  type: object,
+                  properties:
+                    {
+                      data:
+                        {
+                          type: object,
+                          properties: { reference: { type: string, example: ENQ-7K3M9QX2 } },
+                        },
+                    },
+                }
+        "200":
+          {
+            description: Duplicate of an earlier request with the same key; original reference returned,
+          }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/v1/admin/enquiries:
+    get:
+      tags: [Admin]
+      summary: Lead inbox (permission enquiries.read)
+      security: [{ session: [] }]
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/EnquiryStatus" } }
+        - {
+            name: owner,
+            in: query,
+            schema: { type: string },
+            description: "`me`, `unassigned` or a user UUID",
+          }
+        - { name: service, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200": { description: OK (25 per page) }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/v1/admin/enquiries/{id}:
+    get:
+      tags: [Admin]
+      summary: Enquiry detail with activities, consent and notification status (enquiries.read)
+      security: [{ session: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [Admin]
+      summary: Change status and/or owner (enquiries.update)
+      description: Optimistic concurrency; a stale `version` returns 409.
+      security: [{ session: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                status: { $ref: "#/components/schemas/EnquiryStatus" }
+                assignedToId:
+                  { type: string, description: "User UUID, or empty string to unassign" }
+                version: { type: integer }
+      responses:
+        "200": { description: Updated }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/v1/admin/enquiries/{id}/activities:
+    post:
+      tags: [Admin]
+      summary: Add an internal note or follow-up record (enquiries.update)
+      security: [{ session: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, body]
+              properties:
+                type: { type: string, enum: [note, follow_up] }
+                body: { type: string, maxLength: 5000 }
+      responses:
+        "201": { description: Created }
+  /api/v1/admin/content/{kind}/{id}/transition:
+    post:
+      tags: [Admin]
+      summary: Workflow action on a page, service or project
+      description: Role and state rules are enforced server-side. Editors may submit/withdraw; publishers may also publish, reject (note required), unpublish, archive, restore and delete never-published drafts.
+      security: [{ session: [] }]
+      parameters:
+        - {
+            name: kind,
+            in: path,
+            required: true,
+            schema: { type: string, enum: [page, service, project] },
+          }
+        - { $ref: "#/components/parameters/Id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  {
+                    type: string,
+                    enum: [submit, withdraw, publish, reject, unpublish, archive, restore, delete],
+                  }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        "200": { description: Done }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422":
+          { description: Publication blocked (missing evidence approval, SEO description, etc.) }
+  /api/health:
+    get:
+      tags: [Operations]
+      summary: Liveness; add `?ready=1` to also check the database
+      responses:
+        "200": { description: Healthy }
+        "503": { description: Database unavailable (readiness only) }
+  /api/internal/jobs:
+    post:
+      tags: [Operations]
+      summary: Run notification delivery and maintenance (for cron platforms)
+      security: [{ cronSecret: [] }]
+      responses:
+        "200": { description: Job results }
+        "404": { description: Disabled or wrong secret }
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: __Host-cw_session }
+    cronSecret: { type: http, scheme: bearer }
+  parameters:
+    Slug:
+      {
+        name: slug,
+        in: path,
+        required: true,
+        schema: { type: string, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$" },
+      }
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  fields:
+                    { type: object, additionalProperties: { type: array, items: { type: string } } }
+                  requestId: { type: string }
+  schemas:
+    EnquiryStatus:
+      type: string
+      enum: [NEW, IN_REVIEW, QUALIFIED, IN_PROGRESS, WON, LOST, NOT_QUALIFIED, CLOSED]
+    ServiceSummary:
+      type: object
+      properties:
+        {
+          slug: { type: string },
+          name: { type: string },
+          headline: { type: string },
+          summary: { type: string },
+          url: { type: string },
+        }
+    ProjectSummary:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        client:
+          {
+            type: string,
+            description: Client name only when permission is granted,
+            otherwise an anonymised label,
+          }
+        services:
+          {
+            type: array,
+            items: { type: object, properties: { slug: { type: string }, name: { type: string } } },
+          }
+        url: { type: string }
+    EnquiryRequest:
+      type: object
+      required: [name, email, organisation, services, projectSummary, privacyAcknowledged]
+      properties:
+        name: { type: string, maxLength: 120 }
+        email: { type: string, format: email, maxLength: 254 }
+        organisation: { type: string, maxLength: 160 }
+        phone: { type: string, description: Required, optional or ignored per site settings }
+        country: { type: string, maxLength: 80 }
+        services:
+          { type: array, minItems: 1, items: { type: string, description: Published service slug } }
+        projectSummary: { type: string, minLength: 20, maxLength: 5000 }
+        timeline:
+          { type: string, enum: [asap, within_3_months, 3_to_6_months, 6_plus_months, exploring] }
+        budgetRange: { type: string, enum: [under_25k, 25k_75k, 75k_150k, 150k_plus, not_sure] }
+        contactPreference: { type: string, enum: [email, phone], default: email }
+        privacyAcknowledged: { type: boolean, const: true }
+        source:
+          type: object
+          properties:
+            {
+              path: { type: string },
+              service: { type: string },
+              utmSource: { type: string },
+              utmMedium: { type: string },
+              utmCampaign: { type: string },
+            }

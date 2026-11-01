@@ -1,0 +1,11 @@
+.next
+node_modules
+dist
+coverage
+playwright-report
+test-results
+prisma/migrations
+package-lock.json
+.next-e2e
+storage
+.github

@@ -1,0 +1,385 @@
+// Data model for the corporate website (spec section 9.2).
+// All timestamps are stored in UTC (BR-14). Public references use UUIDs (BR-16).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity and access
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN // users, roles, settings, audit, redirects, notifications
+  PUBLISHER // review, publish, unpublish, archive content; approve evidence
+  EDITOR // create and edit content, submit for review
+  SALES // business development: lead inbox, status, assignment, notes
+  SALES_MANAGER // SALES plus export and retention/deletion of enquiries
+  MARKETING // aggregated reporting only
+}
+
+model AdminUser {
+  id                String    @id @default(uuid()) @db.Uuid
+  email             String    @unique // stored lower-case
+  displayName       String
+  passwordHash      String?
+  // TOTP secret is encrypted at rest with APP_ENCRYPTION_KEY (AES-256-GCM).
+  mfaSecretEnc      String?
+  mfaEnabledAt      DateTime?
+  mfaLastUsedStep   Int? // rejects replay of an already-used TOTP code
+  active            Boolean   @default(true)
+  lastSignInAt      DateTime?
+  failedLogins      Int       @default(0)
+  lockedUntil       DateTime?
+  passwordChangedAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  roles             UserRole[]
+  sessions          Session[]
+  setupTokens       UserSetupToken[]
+  assignedEnquiries Enquiry[]         @relation("EnquiryAssignee")
+  activities        EnquiryActivity[]
+  mediaUploads      MediaAsset[]
+}
+
+model UserRole {
+  userId    String    @db.Uuid
+  role      Role
+  grantedAt DateTime  @default(now())
+  grantedBy String?   @db.Uuid
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+}
+
+model Session {
+  id         String    @id @default(uuid()) @db.Uuid
+  tokenHash  String    @unique // SHA-256 of the opaque cookie token
+  userId     String    @db.Uuid
+  mfaPending Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  ipHash     String?
+  userAgent  String?
+  user       AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model UserSetupToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  tokenHash String    @unique
+  userId    String    @db.Uuid
+  purpose   String // "invite" | "reset"
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Content (draft working copy + immutable published snapshot)
+// ---------------------------------------------------------------------------
+
+enum ContentStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+model Page {
+  id                    String        @id @default(uuid()) @db.Uuid
+  slug                  String        @unique // working slug
+  publishedSlug         String?       @unique // slug currently routed publicly
+  title                 String
+  content               Json // validated by pageContentSchema
+  seoTitle              String?
+  seoDescription        String?
+  showInFooter          Boolean       @default(false)
+  status                ContentStatus @default(DRAFT)
+  published             Json? // snapshot served publicly
+  publishedAt           DateTime?
+  hasUnpublishedChanges Boolean       @default(false)
+  reviewNote            String?
+  authorId              String?       @db.Uuid
+  approverId            String?       @db.Uuid
+  lastReviewedAt        DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+}
+
+model Service {
+  id                    String        @id @default(uuid()) @db.Uuid
+  slug                  String        @unique
+  publishedSlug         String?       @unique
+  name                  String
+  sortOrder             Int           @default(0)
+  content               Json // validated by serviceContentSchema
+  seoTitle              String?
+  seoDescription        String?
+  status                ContentStatus @default(DRAFT)
+  published             Json?
+  publishedAt           DateTime?
+  hasUnpublishedChanges Boolean       @default(false)
+  reviewNote            String?
+  authorId              String?       @db.Uuid
+  approverId            String?       @db.Uuid
+  lastReviewedAt        DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  projects         ProjectService[]
+  enquiryInterests EnquiryServiceInterest[]
+}
+
+enum ClientPermission {
+  NOT_REQUIRED // anonymised; no identifying client content
+  PENDING
+  GRANTED
+}
+
+model Project {
+  id                    String           @id @default(uuid()) @db.Uuid
+  slug                  String           @unique
+  publishedSlug         String?          @unique
+  title                 String
+  summary               String
+  content               Json // validated by projectContentSchema
+  thumbnailId           String?          @db.Uuid
+  featured              Boolean          @default(false)
+  sortDate              DateTime         @default(now())
+  clientPermission      ClientPermission @default(NOT_REQUIRED)
+  evidenceApprovedById  String?          @db.Uuid
+  evidenceApprovedAt    DateTime?
+  evidenceNote          String?
+  seoTitle              String?
+  seoDescription        String?
+  status                ContentStatus    @default(DRAFT)
+  published             Json?
+  publishedAt           DateTime?
+  publishedServiceIds String[]         @default([])
+  hasUnpublishedChanges Boolean          @default(false)
+  reviewNote            String?
+  authorId              String?          @db.Uuid
+  approverId            String?          @db.Uuid
+  lastReviewedAt        DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  services  ProjectService[]
+  thumbnail MediaAsset?      @relation(fields: [thumbnailId], references: [id], onDelete: SetNull)
+
+  @@index([status, sortDate])
+}
+
+model ProjectService {
+  projectId String  @db.Uuid
+  serviceId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, serviceId])
+  @@index([serviceId])
+}
+
+model MediaAsset {
+  id           String   @id @default(uuid()) @db.Uuid
+  storageKey   String   @unique
+  originalName String
+  mimeType     String // detected from content, never from filename
+  sizeBytes    Int
+  width        Int
+  height       Int
+  altText      String
+  scanStatus   String // "reencoded" when content was decoded and re-encoded
+  uploadedById String?  @db.Uuid
+  createdAt    DateTime @default(now())
+
+  uploadedBy AdminUser? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  projects   Project[]
+}
+
+model Redirect {
+  id         String   @id @default(uuid()) @db.Uuid
+  sourcePath String   @unique
+  targetPath String
+  statusCode Int      @default(308)
+  enabled    Boolean  @default(true)
+  createdBy  String?  @db.Uuid
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model SiteSetting {
+  key       String   @id
+  value     Json
+  updatedBy String?  @db.Uuid
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Enquiries
+// ---------------------------------------------------------------------------
+
+enum EnquiryStatus {
+  NEW
+  IN_REVIEW
+  QUALIFIED
+  IN_PROGRESS
+  WON
+  LOST
+  NOT_QUALIFIED
+  CLOSED
+}
+
+model Enquiry {
+  id                String        @id @default(uuid()) @db.Uuid
+  reference         String        @unique // human-friendly, non-sequential
+  submissionKey     String        @unique // idempotency key (FR-ENQ-005)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  version           Int           @default(1) // optimistic concurrency
+  name              String
+  email             String
+  emailNormalized   String
+  organisation      String
+  phone             String?
+  country           String?
+  projectSummary    String
+  timeline          String?
+  budgetRange       String?
+  contactPreference String        @default("email")
+  status            EnquiryStatus @default(NEW)
+  assignedToId      String?       @db.Uuid
+  sourcePath        String?
+  sourceService     String?
+  utmSource         String?
+  utmMedium         String?
+  utmCampaign       String?
+  utmTerm           String?
+  utmContent        String?
+  referrerHost      String?
+  firstResponseAt   DateTime?
+  anonymisedAt      DateTime?
+  closedAt          DateTime?
+
+  assignedTo       AdminUser?               @relation("EnquiryAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  serviceInterests EnquiryServiceInterest[]
+  activities       EnquiryActivity[]
+  consents         ConsentRecord[]
+  notifications    Notification[]
+
+  @@index([status, createdAt])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@index([emailNormalized])
+}
+
+model EnquiryServiceInterest {
+  enquiryId    String  @db.Uuid
+  serviceId    String  @db.Uuid
+  // Label captured at submission so history stays readable if the service is renamed.
+  serviceLabel String
+  enquiry      Enquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  service      Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  @@id([enquiryId, serviceId])
+  @@index([serviceId])
+}
+
+model EnquiryActivity {
+  id        String     @id @default(uuid()) @db.Uuid
+  enquiryId String     @db.Uuid
+  type      String // note | follow_up | status_change | assignment | system
+  body      String?
+  metadata  Json?
+  actorId   String?    @db.Uuid
+  createdAt DateTime   @default(now())
+  enquiry   Enquiry    @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  actor     AdminUser? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([enquiryId, createdAt])
+}
+
+model ConsentRecord {
+  id            String   @id @default(uuid()) @db.Uuid
+  enquiryId     String?  @db.Uuid
+  purpose       String // e.g. "privacy_notice_acknowledged"
+  policyVersion String
+  choice        Boolean
+  captureSource String // e.g. "enquiry_form"
+  createdAt     DateTime @default(now())
+  enquiry       Enquiry? @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+
+  @@index([enquiryId])
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED // will retry
+  DEAD // retries exhausted, operator attention required
+  SKIPPED
+}
+
+model Notification {
+  id            String             @id @default(uuid()) @db.Uuid
+  kind          String // enquiry_internal | enquiry_ack | ops_alert | user_invite
+  enquiryId     String?            @db.Uuid
+  recipient     String
+  payload       Json // minimal template variables, never the full brief
+  status        NotificationStatus @default(PENDING)
+  attempts      Int                @default(0)
+  nextAttemptAt DateTime           @default(now())
+  lockedUntil   DateTime?
+  lastError     String?
+  sentAt        DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  enquiry       Enquiry?           @relation(fields: [enquiryId], references: [id], onDelete: SetNull)
+
+  @@index([status, nextAttemptAt])
+  @@index([enquiryId])
+}
+
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
+
+model AuditEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  createdAt  DateTime @default(now())
+  actorId    String?  @db.Uuid
+  actorEmail String?
+  action     String
+  entityType String?
+  entityId   String?
+  requestId  String?
+  metadata   Json?
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([action])
+}
+
+model RateLimitBucket {
+  key         String   @id
+  windowStart DateTime
+  count       Int
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
